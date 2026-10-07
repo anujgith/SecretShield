@@ -28,6 +28,9 @@ from app.services.risk_engine import calculate_risk
 
 
 FAIL_ACTIONS = {"BLOCK", "REVIEW"}
+DASHBOARD_BASE_URL = os.environ.get(
+    "SECRETSHIELD_DASHBOARD_URL", "http://localhost:5173"
+).strip().rstrip("/")
 GENERATED_DIRECTORIES = {
     ".git",
     "__pycache__",
@@ -269,6 +272,23 @@ def _dashboard_border(char: str = "=") -> str:
     return char * 72
 
 
+def _print_dashboard_link() -> None:
+    """Print a best-effort OSC 8 link and an always-visible plain URL."""
+    url = DASHBOARD_BASE_URL or "http://localhost:5173"
+    terminal = os.environ.get("TERM_PROGRAM", "").lower()
+    supports_osc8 = sys.stdout.isatty() and (
+        bool(os.environ.get("WT_SESSION"))
+        or terminal in {"vscode", "wezterm", "iterm.app"}
+    )
+
+    print("\n" + _dashboard_border())
+    print("  SECRET SHIELD DASHBOARD")
+    if supports_osc8:
+        print(f"  Open: \x1b]8;;{url}\x1b\\{url}\x1b]8;;\x1b\\")
+    print(f"  Open: {url}")
+    print(_dashboard_border())
+
+
 def _report(findings: list[dict], repository: Path) -> bool:
     print("+" + _dashboard_border("-") + "+")
     print("|" + " SECRET SHIELD  |  PRE-COMMIT SECURITY GATE ".center(72) + "|")
@@ -316,6 +336,7 @@ def _report(findings: list[dict], repository: Path) -> bool:
         print("\n" + _dashboard_border())
         print("  SecretShield found no staged secrets requiring action.")
         print(_dashboard_border())
+    _print_dashboard_link()
     return should_block
 
 
