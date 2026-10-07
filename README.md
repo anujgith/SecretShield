@@ -1,28 +1,65 @@
-## Local Pre-Commit Protection
+# SecretShield
 
-SecretShield can check staged changes before Git creates a commit. The hook runs the existing Gitleaks detector, then applies SecretShield's Risk Engine and Policy Engine. `BLOCK` and `REVIEW` findings reject the commit; `WARN` and `ALLOW` findings let it proceed. The hook scans only relevant staged files, does not scan Git history, and never prints or stores raw secret values. GitHub Actions remains the second security layer and scans both current files and Git history.
+SecretShield scans current repository files and staged Git changes with Gitleaks, then applies its Risk Engine and Policy Engine. The CLI and FastAPI share the current-file scan service. Findings and incidents contain metadata; raw secret values are not displayed or persisted.
 
-The developer repository does not need SecretShield's source or dashboard. Clone SecretShield separately, then install its hook into the developer repository. On Windows PowerShell, from the developer repository:
+## Install the CLI once
+
+From a SecretShield checkout, install the package into the Python environment you use:
 
 ```powershell
-git clone https://github.com/anujgith/SecretShield.git ..\SecretShield
-py ..\SecretShield\scripts\install_secretshield_hook.py
+py -m pip install -e .
 ```
 
-On Linux or macOS, from the developer repository:
+The `secretshield` command can then be used from any repository; the SecretShield source does not need to be copied there. Install Gitleaks separately and make it available on `PATH`, or set `GITLEAKS_PATH` to its executable.
+
+## Scan a repository
 
 ```sh
-git clone https://github.com/anujgith/SecretShield.git ../SecretShield
-python3 ../SecretShield/scripts/install_secretshield_hook.py
+secretshield scan .
+secretshield scan C:/path/to/repository
+secretshield scan --staged
 ```
 
-Gitleaks must be installed locally. The hook uses `GITLEAKS_PATH` when set; otherwise it finds `gitleaks` on `PATH` or uses SecretShield's existing Windows default (`C:\gitleaks\gitleaks.exe`). If the SecretShield checkout is moved, run the installer again so the local hook points to its new location.
+Current-file scans persist incidents in the SecretShield user data database (or the path configured by `SECRET_SHIELD_DATABASE_PATH`). Staged scans examine the Git index and apply the pre-commit policy without scanning unstaged working-tree changes.
 
-After installation, use the normal Git workflow:
+## Protect a repository
+
+Run these commands from the repository to protect:
 
 ```sh
+secretshield protect
+secretshield status
 git add .
 git commit -m "Add feature"
+secretshield unprotect
 ```
 
-When policy returns `REVIEW` or `BLOCK`, Git rejects the commit with exit code 1. A clean scan, or findings returning `WARN` or `ALLOW`, exits 0 and permits the commit. Scanner or configuration errors exit 2 and also prevent the commit. The local hook complements the reusable GitHub Actions security gate; it does not replace it.
+The managed pre-commit hook invokes the installed CLI. It refuses to replace an unrecognized existing hook. `BLOCK` and `REVIEW` findings reject a commit, `WARN` and `ALLOW` let it proceed, and scanner errors also prevent the commit.
+
+## Run the dashboard
+
+From the project root, create the Python environment and install SecretShield if you have not already:
+
+```powershell
+py -m venv backend/.venv
+backend\.venv\Scripts\python.exe -m pip install -e .
+```
+
+Then, in separate terminals, start the backend and frontend:
+
+```powershell
+backend\.venv\Scripts\python.exe -m uvicorn app.main:app --app-dir backend --reload
+```
+
+```powershell
+cd frontend
+npm.cmd run dev
+```
+
+The dashboard reads incidents from the FastAPI database. Set `SECRET_SHIELD_DATABASE_PATH` for the backend if it should share the CLI's database.
+
+Secret rotation in the dashboard is a **mock simulation only**. It makes no provider API calls and does not change credentials. Incident resolution continues to depend on the existing fingerprint rescan.
+
+## GitHub Actions
+
+The included workflow checks out full Git history (`fetch-depth: 0`) and scans current files and historical commits. In another workflow, check out the caller repository with `fetch-depth: 0` before invoking the composite action. The action runs SecretShield against the caller's `GITHUB_WORKSPACE`; it does not check out or scan the SecretShield source repository as the target.

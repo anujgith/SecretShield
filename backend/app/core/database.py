@@ -3,7 +3,9 @@ import os
 from sqlalchemy import create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
 
-DATABASE_PATH = os.path.abspath("secretshield.db")
+DATABASE_PATH = os.path.abspath(
+    os.environ.get("SECRET_SHIELD_DATABASE_PATH", "secretshield.db")
+)
 DATABASE_URL = f"sqlite:///{DATABASE_PATH}"
 
 print("DATABASE FILE:", DATABASE_PATH)

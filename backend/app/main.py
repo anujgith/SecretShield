@@ -1,6 +1,7 @@
 from app.core.database import Base, engine
 from app.models.incident import Incident
 from app.models.audit import AuditEvent
+from app.models.rotation import RotationOperation
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 

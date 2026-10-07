@@ -8,10 +8,13 @@ from app.core.database import get_db
 from app.models.incident import Incident
 from app.services.remediation import get_remediation_guidance
 from app.services.policy import evaluate_policy
-from app.services.gitleaks import run_gitleaks
 from app.services.ai_guidance import get_ai_guidance
 from app.services.audit import record_audit_event
 from app.models.audit import AuditEvent
+from app.models.rotation import RotationOperation
+from app.schemas.rotation import RotationResponse
+from app.services.rescan import rescan_incident as perform_rescan
+from app.services.rotation import RotationManager
 
 router = APIRouter(prefix="/incidents", tags=["Incidents"])
 
@@ -53,6 +56,44 @@ def get_incidents(db: Session = Depends(get_db)):
         }
         for incident in incidents
     ]
+
+
+@router.get("/{incident_id}", summary="Get incident details")
+def get_incident(incident_id: str, db: Session = Depends(get_db)):
+    incident = (
+        db.query(Incident)
+        .filter(Incident.incident_id == incident_id)
+        .first()
+    )
+    if not incident:
+        raise HTTPException(status_code=404, detail="Incident not found")
+
+    return {
+        "id": incident.id,
+        "incident_id": incident.incident_id,
+        "repository": incident.repository,
+        "file_path": incident.file_path,
+        "secret_type": incident.secret_type,
+        "severity": incident.severity,
+        "risk_score": incident.risk_score,
+        "commit_hash": incident.commit_hash,
+        "fingerprint": incident.fingerprint,
+        "status": incident.status,
+        "description": incident.description,
+        "created_at": incident.created_at,
+        "updated_at": incident.updated_at,
+        "source": "current-file",
+        "policy": evaluate_policy(
+            severity=incident.severity,
+            secret_type=incident.secret_type,
+            risk_score=incident.risk_score,
+        ),
+        "ai_guidance": get_ai_guidance(
+            secret_type=incident.secret_type,
+            severity=incident.severity,
+            description=incident.description,
+        ),
+    }
 
 
 @router.patch(
@@ -142,17 +183,8 @@ def rescan_incident(
             detail="Incident not found"
         )
 
-    if not incident.fingerprint:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "This incident cannot be safely rescanned because its "
-                "fingerprint is missing."
-            )
-        )
-
     try:
-        findings = run_gitleaks(incident.repository)
+        return perform_rescan(db, incident)
     except FileNotFoundError as exc:
         db.rollback()
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -166,68 +198,90 @@ def rescan_incident(
         db.rollback()
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    matching_finding = next(
-        (
-            finding for finding in findings
-            if finding.get("Fingerprint") == incident.fingerprint
-        ),
-        None,
+
+@router.post(
+    "/{incident_id}/rotate",
+    response_model=RotationResponse,
+    summary="Simulate a mock secret rotation and rescan",
+)
+def rotate_incident_secret(incident_id: str, db: Session = Depends(get_db)):
+    incident = (
+        db.query(Incident)
+        .filter(Incident.incident_id == incident_id)
+        .first()
     )
-
-    if matching_finding:
-        incident.status = "INVESTIGATING"
-        try:
-            db.commit()
-        except Exception as exc:
-            db.rollback()
-            raise HTTPException(
-                status_code=500,
-                detail=str(exc)
-            ) from exc
-
-        record_audit_event(
-            db,
-            "RESCAN",
-            "Rescan completed; the secret remains detected.",
-            incident_id=incident.incident_id,
-            repository=incident.repository,
+    if not incident:
+        raise HTTPException(status_code=404, detail="Incident not found")
+    if incident.status.upper() == "RESOLVED":
+        raise HTTPException(
+            status_code=409,
+            detail="Incident is already resolved; no rotation is needed.",
+        )
+    if not incident.fingerprint:
+        raise HTTPException(
+            status_code=400,
+            detail="This incident cannot be safely rescanned because its fingerprint is missing.",
         )
 
-        return {
-            "incident_id": incident.incident_id,
-            "status": "INVESTIGATING",
-            "resolved": False,
-            "message": "Secret is still exposed.",
-            "finding": {
-                "file": matching_finding.get("File"),
-                "secret_type": matching_finding.get("RuleID"),
-                "fingerprint": matching_finding.get("Fingerprint"),
-            },
-        }
+    operation = (
+        db.query(RotationOperation)
+        .filter(RotationOperation.incident_id == incident.incident_id)
+        .first()
+    )
+    if operation is None:
+        record_audit_event(
+            db, "ROTATION_REQUESTED", "Mock rotation requested.",
+            incident_id=incident.incident_id, repository=incident.repository,
+        )
+        simulated = RotationManager().simulate_rotation()
+        operation = RotationOperation(
+            incident_id=incident.incident_id,
+            provider=simulated["provider"],
+            status=simulated["status"],
+            operation_id=simulated["operation_id"],
+            created_at=simulated["created_at"],
+            completed_at=simulated["completed_at"],
+        )
+        db.add(operation)
+        try:
+            db.commit()
+            db.refresh(operation)
+        except Exception as exc:
+            db.rollback()
+            raise HTTPException(status_code=500, detail="Could not persist mock rotation metadata.") from exc
+        record_audit_event(
+            db, "ROTATION_SIMULATED", "Mock rotation operation simulated.",
+            incident_id=incident.incident_id, repository=incident.repository,
+        )
 
-    incident.status = "RESOLVED"
     try:
-        db.commit()
+        rescan_result = perform_rescan(db, incident)
+    except FileNotFoundError as exc:
+        db.rollback()
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
     except Exception as exc:
         db.rollback()
-        raise HTTPException(
-            status_code=500,
-            detail=str(exc)
-        ) from exc
+        raise HTTPException(status_code=500, detail="Rescan after mock rotation failed.") from exc
 
     record_audit_event(
-        db,
-        "RESOLVE",
-        "Rescan confirmed the secret is no longer detected; incident resolved.",
-        incident_id=incident.incident_id,
-        repository=incident.repository,
+        db, "RESCAN_AFTER_ROTATION", "Fingerprint rescan completed after mock rotation.",
+        incident_id=incident.incident_id, repository=incident.repository,
     )
-
     return {
         "incident_id": incident.incident_id,
-        "status": "RESOLVED",
-        "resolved": True,
-        "message": "Secret is no longer detected. Incident resolved.",
+        "provider": operation.provider,
+        "status": operation.status,
+        "operation_id": operation.operation_id,
+        "created_at": operation.created_at,
+        "completed_at": operation.completed_at,
+        "rescan": rescan_result,
+        "incident_status": incident.status,
     }
 
 

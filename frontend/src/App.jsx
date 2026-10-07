@@ -12,6 +12,9 @@ function App() {
   const [error, setError] = useState("");
   const [rescanningIncident, setRescanningIncident] = useState(null);
   const [rescanResult, setRescanResult] = useState(null);
+  const [rotatingIncident, setRotatingIncident] = useState(null);
+  const [rotationResult, setRotationResult] = useState(null);
+  const [rotationError, setRotationError] = useState("");
   const [detailIncident, setDetailIncident] = useState(null);
   const [historyRepositoryPath, setHistoryRepositoryPath] = useState("");
   const [historyLoading, setHistoryLoading] = useState(false);
@@ -28,10 +31,12 @@ function App() {
     }
   };
 
-  const loadIncidents = async () => {
+  const loadIncidents = async (showLoading = true) => {
     try {
-      setLoading(true);
-      setError("");
+      if (showLoading) {
+        setLoading(true);
+        setError("");
+      }
 
       const response = await fetch(`${API_URL}/incidents/`);
 
@@ -41,10 +46,14 @@ function App() {
 
       const data = await response.json();
       setIncidents(data);
+      setDetailIncident((current) => {
+        if (!current?.incident_id) return current;
+        return data.find((incident) => incident.incident_id === current.incident_id) || current;
+      });
     } catch (err) {
       setError(err.message);
     } finally {
-      setLoading(false);
+      if (showLoading) setLoading(false);
     }
   };
 const loadRemediation = async (incidentId, currentStatus) => {
@@ -104,6 +113,82 @@ const loadRemediation = async (incidentId, currentStatus) => {
     loadActivity();
   } catch (err) {
     setError(err.message);
+  }
+};
+
+const rotateIncident = async (incidentId) => {
+  setRotatingIncident(incidentId);
+  setRotationError("");
+  setRotationResult(null);
+
+  try {
+    const response = await fetch(`${API_URL}/incidents/${incidentId}/rotate`, {
+      method: "POST",
+    });
+
+    if (response.status === 404) {
+      setRotationError("Incident not found. Refresh the dashboard and try again.");
+      return;
+    }
+    if (response.status === 409) {
+      setRotationError("This incident is already resolved; mock rotation is not applicable.");
+      setIncidents((current) => current.map((incident) => (
+        incident.incident_id === incidentId
+          ? { ...incident, status: "RESOLVED" }
+          : incident
+      )));
+      setDetailIncident((current) => (
+        current?.incident_id === incidentId
+          ? { ...current, status: "RESOLVED" }
+          : current
+      ));
+      await loadIncidents(false);
+      return;
+    }
+    if (!response.ok) {
+      setRotationError("Could not complete the mock rotation. Please try again.");
+      return;
+    }
+
+    const data = await response.json();
+    const safeIncidentStatus = ["INVESTIGATING", "RESOLVED"].includes(data.incident_status)
+      ? data.incident_status
+      : "INVESTIGATING";
+    const safeOperationId = /^MOCK-[A-Z0-9]+$/.test(data.operation_id || "")
+      ? data.operation_id
+      : "Unavailable";
+    const safeResult = {
+      incidentId,
+      provider: "MOCK",
+      status: "SIMULATED",
+      operationId: safeOperationId,
+      incidentStatus: safeIncidentStatus,
+      fingerprintPresent: data.rescan?.resolved !== true,
+    };
+    setRotationResult(safeResult);
+    setIncidents((current) => current.map((incident) => (
+      incident.incident_id === incidentId
+        ? { ...incident, status: safeIncidentStatus }
+        : incident
+    )));
+    setDetailIncident((current) => (
+      current?.incident_id === incidentId
+        ? { ...current, status: safeIncidentStatus }
+        : current
+    ));
+    setRemediation((current) => (
+      current?.incident_id === incidentId
+        ? { ...current, status: safeIncidentStatus }
+        : current
+    ));
+
+    // Refresh from the backend after applying its authoritative status.
+    await loadIncidents(false);
+    await loadActivity();
+  } catch {
+    setRotationError("Could not reach SecretShield to run the mock rotation. Please try again.");
+  } finally {
+    setRotatingIncident((current) => current === incidentId ? null : current);
   }
 };
 const updateIncidentStatus = async (incidentId, newStatus) => {
@@ -500,7 +585,10 @@ const scanGitHistory = async (event) => {
                       <td>
                         <button
                           className="incident-link"
-                          onClick={() => setDetailIncident(incident)}
+                          onClick={() => {
+                            setRotationError("");
+                            setDetailIncident(incident);
+                          }}
                           aria-label={`View details for ${incident.incident_id}`}
                         >
                           {incident.incident_id}
@@ -711,6 +799,45 @@ const scanGitHistory = async (event) => {
                   {detailIncident.policy?.reason && ` · ${detailIncident.policy.reason}`}
                 </p>
               </div>
+
+              {detailIncident.incident_id && (
+                <div className="detail-section rotation-panel">
+                  <h3>Mock Secret Rotation</h3>
+                  <p className="rotation-warning">
+                    SIMULATION ONLY — no real credential is rotated.
+                  </p>
+                  {detailIncident.status?.toUpperCase() !== "RESOLVED" ? (
+                    <button
+                      className="rotation-button"
+                      disabled={rotatingIncident === detailIncident.incident_id}
+                      onClick={() => rotateIncident(detailIncident.incident_id)}
+                    >
+                      {rotatingIncident === detailIncident.incident_id
+                        ? "Simulating rotation..."
+                        : "Simulate Secret Rotation (MOCK)"}
+                    </button>
+                  ) : (
+                    <p className="rotation-resolved-note">This incident is already resolved.</p>
+                  )}
+                  {rotationError && (
+                    <p className="rotation-error" role="alert">{rotationError}</p>
+                  )}
+                  {rotationResult?.incidentId === detailIncident.incident_id && (
+                    <div className="rotation-result" role="status">
+                      <strong>Rotation Result</strong>
+                      <span>Provider: {rotationResult.provider}</span>
+                      <span>Status: {rotationResult.status}</span>
+                      <span>Operation ID: {rotationResult.operationId}</span>
+                      <span>
+                        Rescan: {rotationResult.fingerprintPresent
+                          ? "Fingerprint still detected"
+                          : "Fingerprint no longer detected"}
+                      </span>
+                      <span>Incident: {rotationResult.incidentStatus}</span>
+                    </div>
+                  )}
+                </div>
+              )}
 
               <div className="detail-section">
                 <h3>AI Guidance</h3>

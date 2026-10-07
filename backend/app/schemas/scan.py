@@ -19,6 +19,7 @@ class ScanFinding(BaseModel):
     risk_score: int = 0
     severity: str = "LOW"
     risk_reasons: list[str] = []
+    incident_id: str | None = None
 
 class ScanResponse(BaseModel):
     status: str

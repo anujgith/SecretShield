@@ -801,6 +801,75 @@ td strong {
   background: #0f172a;
 }
 
+.rotation-panel {
+  border-color: #164e63;
+}
+
+.rotation-panel h3 {
+  color: #a5f3fc;
+}
+
+.rotation-warning {
+  margin-bottom: 12px;
+  color: #fcd34d !important;
+  font-weight: 700;
+}
+
+.rotation-resolved-note {
+  color: #86efac !important;
+}
+
+.rotation-button {
+  border: 1px solid #0e7490;
+  border-radius: 7px;
+  background: #083344;
+  color: #a5f3fc;
+  padding: 9px 13px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.rotation-button:hover:not(:disabled) {
+  border-color: #22d3ee;
+  background: #0e4a5d;
+}
+
+.rotation-button:disabled {
+  border-color: #334155;
+  background: #1e293b;
+  color: #94a3b8;
+  cursor: wait;
+}
+
+.rotation-button:focus-visible {
+  outline: 2px solid #67e8f9;
+  outline-offset: 2px;
+}
+
+.rotation-error {
+  margin-top: 10px;
+  color: #fca5a5 !important;
+}
+
+.rotation-result {
+  display: grid;
+  gap: 6px;
+  margin-top: 14px;
+  padding: 12px;
+  border: 1px solid rgba(34, 211, 238, 0.2);
+  border-radius: 7px;
+  background: rgba(8, 51, 68, 0.45);
+  color: #cbd5e1;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.rotation-result strong {
+  color: #a5f3fc;
+}
+
 .detail-section h3,
 .detail-policy h3 {
   margin-bottom: 7px;

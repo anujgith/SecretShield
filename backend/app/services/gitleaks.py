@@ -30,6 +30,7 @@ def run_gitleaks(repository_path: str) -> list[dict]:
     "--report-path",
     "-",
     "--no-banner",
+    "--redact=100",
 ]
     
 
@@ -62,4 +63,14 @@ def run_gitleaks(repository_path: str) -> list[dict]:
     if not isinstance(findings, list):
         raise RuntimeError("Unexpected Gitleaks output format.")
 
-    return findings
+    # Keep only metadata needed downstream. Gitleaks reports may contain raw
+    # values in fields such as Match, Secret, or Raw; they must not escape.
+    safe_fields = {
+        "RuleID", "Description", "File", "StartLine", "StartColumn",
+        "Commit", "Fingerprint",
+    }
+    return [
+        {key: value for key, value in finding.items() if key in safe_fields}
+        for finding in findings
+        if isinstance(finding, dict)
+    ]

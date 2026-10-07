@@ -1,160 +1,37 @@
-from uuid import uuid4
-
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from app.schemas.scan import ScanRequest, ScanResponse, ScanFinding
-from app.services.gitleaks import run_gitleaks
-from app.services.risk_engine import calculate_risk
-from app.services.policy import evaluate_policy
 from app.core.database import get_db
-from app.models.incident import Incident
+from app.schemas.scan import ScanRequest, ScanResponse
 from app.services.audit import record_audit_event
-
+from app.services.scan import scan_repository as run_shared_scan
 
 router = APIRouter(prefix="/scan", tags=["Scans"])
 
 
 @router.post(
-    "",
-    response_model=ScanResponse,
-    summary="Scan current repository files",
+    "", response_model=ScanResponse, summary="Scan current repository files",
     description=(
-        "Scans the current files in a local repository with Gitleaks. "
-        "Finding responses and incident records contain metadata only; "
-        "raw secret values are never returned or stored."
+        "Scans local repository files. Responses and incident records contain "
+        "metadata only; raw secret values are never returned or stored."
     ),
 )
-async def scan_repository(
-    request: ScanRequest,
-    db: Session = Depends(get_db)
-):
+async def scan_repository(request: ScanRequest, db: Session = Depends(get_db)):
     try:
-        record_audit_event(
-            db,
-            "SCAN",
-            "Current-file repository scan started.",
-            repository=request.repository_path,
-        )
-        raw_findings = run_gitleaks(request.repository_path)
-
-        findings = []
-        audit_findings = []
-
-        for finding in raw_findings:
-            risk = calculate_risk(finding)
-            policy = evaluate_policy(
-                severity=risk["severity"],
-                secret_type=finding.get("RuleID"),
-                risk_score=risk["score"],
-            )
-            scan_finding = ScanFinding(
-                rule_id=finding.get("RuleID"),
-                description=finding.get("Description"),
-                file=finding.get("File"),
-                line=finding.get("StartLine"),
-                column=finding.get("StartColumn"),
-                secret_type=finding.get("RuleID"),
-                fingerprint=finding.get("Fingerprint"),
-                risk_score=risk["score"],
-                severity=risk["severity"],
-                risk_reasons=risk["reasons"],
-            )
-
-            findings.append(scan_finding)
-
-            incident_id = f"INC-{uuid4().hex[:8].upper()}"
-            incident = Incident(
-                incident_id=incident_id,
-                repository=request.repository_path,
-                file_path=finding.get("File"),
-                secret_type=finding.get("RuleID"),
-                severity=risk["severity"],
-                risk_score=risk["score"],
-                commit_hash=finding.get("Commit"),
-                fingerprint=finding.get("Fingerprint"),
-                status="DETECTED",
-                description=finding.get("Description"),
-            )
-
-            db.add(incident)
-            audit_findings.append((finding, risk, policy, incident_id))
-
-        db.commit()
-        record_audit_event(
-            db,
-            "SCAN",
-            f"Current-file repository scan completed with {len(findings)} finding(s).",
-            repository=request.repository_path,
-        )
-        for finding, risk, policy, incident_id in audit_findings:
-            record_audit_event(
-                db,
-                "DETECTION",
-                f"{finding.get('RuleID') or 'Secret'} detected in {finding.get('File') or 'a repository file'}.",
-                repository=request.repository_path,
-            )
-            record_audit_event(
-                db,
-                "INCIDENT",
-                f"Incident {incident_id} created.",
-                incident_id=incident_id,
-                repository=request.repository_path,
-            )
-            record_audit_event(
-                db,
-                "RISK",
-                f"Risk score {risk['score']} / {risk['severity']}.",
-                incident_id=incident_id,
-                repository=request.repository_path,
-            )
-            record_audit_event(
-                db,
-                "POLICY",
-                f"Policy decision {policy['action']} for {finding.get('RuleID') or 'secret'} (risk {risk['score']}, {risk['severity']}).",
-                repository=request.repository_path,
-            )
-
-        return ScanResponse(
-            status="completed",
-            repository_path=request.repository_path,
-            findings_count=len(findings),
-            findings=findings,
-        )
-
+        return run_shared_scan(request.repository_path, db)
     except FileNotFoundError as exc:
         db.rollback()
         record_audit_event(db, "SCAN", "Current-file scan failed: repository path not found.", repository=request.repository_path)
-        raise HTTPException(
-            status_code=404,
-            detail=str(exc),
-        )
-
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         db.rollback()
         record_audit_event(db, "SCAN", "Current-file scan failed: invalid repository path.", repository=request.repository_path)
-        raise HTTPException(
-            status_code=400,
-            detail=str(exc),
-        )
-
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
         db.rollback()
         record_audit_event(db, "SCAN", "Current-file scan failed during Gitleaks execution.", repository=request.repository_path)
-        raise HTTPException(
-            status_code=500,
-            detail=str(exc),
-        )
-
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
     except Exception as exc:
         db.rollback()
-        record_audit_event(
-            db,
-            "SCAN",
-            "Current-file scan failed unexpectedly.",
-            repository=request.repository_path,
-        )
-        raise HTTPException(
-            status_code=500,
-            detail="Current-file scan failed.",
-        ) from exc
+        record_audit_event(db, "SCAN", "Current-file scan failed unexpectedly.", repository=request.repository_path)
+        raise HTTPException(status_code=500, detail="Current-file scan failed.") from exc
